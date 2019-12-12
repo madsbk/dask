@@ -368,6 +368,14 @@ def rearrange_by_column_disk(df, column, npartitions=None, compute=False):
     return DataFrame(graph, name, df._meta, divisions)
 
 
+import dask
+import pprint
+pprint = pprint.PrettyPrinter(indent=4).pprint
+
+def getitem2(a, b, ignore):
+    return getitem(a,b)
+
+
 def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
     """ Order divisions of DataFrame so that all values within column align
 
@@ -419,6 +427,7 @@ def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
     """
     max_branch = max_branch or 32
     n = df.npartitions
+    overcom_fac = 2
 
     stages = int(math.ceil(math.log(n) / math.log(max_branch)))
     if stages > 1:
@@ -456,9 +465,10 @@ def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
 
         split = {  # Get out each individual dataframe piece from the dicts
             ("shuffle-split-" + token, stage, i, inp): (
-                getitem,
+                getitem2,
                 ("shuffle-group-" + token, stage, inp),
                 i,
+                ("shuffle-join-" + token, stage, (i-overcom_fac,))  if i >= overcom_fac else None,                
             )
             for i in range(k)
             for inp in inputs

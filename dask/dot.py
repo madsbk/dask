@@ -115,7 +115,7 @@ def box_label(key):
     ''
     """
     if isinstance(key, tuple):
-        key = key[1:]
+        key = key[:]
         if len(key) == 1:
             [key] = key
         return str(key)

@@ -246,7 +246,8 @@ def merge_indexed_dataframes(lhs, rhs, left_index=True, right_index=True, **kwar
 
 
 shuffle_func = shuffle  # name sometimes conflicts with keyword argument
-
+import dask
+import toolz
 
 def hash_join(
     lhs,
@@ -313,6 +314,9 @@ def hash_join(
 
     divisions = [None] * (npartitions + 1)
     graph = HighLevelGraph.from_collections(name, dsk, dependencies=[lhs2, rhs2])
+
+    print("writing hash_join.svg")
+    dask.visualize(graph, filename="hash_join.svg")
     return new_dd_object(graph, name, meta, divisions)
 
 
@@ -405,6 +409,7 @@ def merge(
     shuffle=None,
     max_branch=None,
 ):
+    print("merge()")
     for o in [on, left_on, right_on]:
         if isinstance(o, _Frame):
             raise NotImplementedError(
