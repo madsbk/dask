@@ -264,18 +264,30 @@ def shuffle(df, index, shuffle=None, npartitions=None, max_branch=32, compute=No
         meta=df._meta._constructor_sliced([0]),
         transform_divisions=False,
     )
-    df2 = df.assign(_partitions=partitions)
-    df2._meta.index.name = df._meta.index.name
-    df3 = rearrange_by_column(
-        df2,
-        "_partitions",
-        npartitions=npartitions,
-        max_branch=max_branch,
-        shuffle=shuffle,
-        compute=compute,
-    )
-    del df3["_partitions"]
-    return df3
+    shuffle = shuffle or config.get("shuffle", None) or "disk"
+    if shuffle == "tasks":
+        df3 = rearrange_by_column(
+            df,
+            partitions,
+            npartitions=npartitions,
+            max_branch=max_branch,
+            shuffle=shuffle,
+            compute=compute,
+        )
+        return df3
+    else:
+        df2 = df.assign(_partitions=partitions)
+        df2._meta.index.name = df._meta.index.name
+        df3 = rearrange_by_column(
+            df2,
+            "_partitions",
+            npartitions=npartitions,
+            max_branch=max_branch,
+            shuffle=shuffle,
+            compute=compute,
+        )
+        del df3["_partitions"]
+        return df3
 
 
 def rearrange_by_divisions(df, column, divisions, max_branch=None, shuffle=None):
@@ -411,6 +423,14 @@ def rearrange_by_column_disk(df, column, npartitions=None, compute=False):
     return DataFrame(graph, name, df._meta, divisions)
 
 
+def make_tuple(*args):
+    return tuple(args)
+
+
+def pair_concat(args):
+    return (_concat([a[0] for a in args]), _concat([a[1] for a in args]))
+
+
 def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
     """ Order divisions of DataFrame so that all values within column align
 
@@ -462,6 +482,8 @@ def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
     """
     max_branch = max_branch or 32
     n = df.npartitions
+    column = df[column] if isinstance(column, str) else column
+    assert column.npartitions == df.npartitions
 
     stages = int(math.ceil(math.log(n) / math.log(max_branch)))
     if stages > 1:
@@ -477,19 +499,33 @@ def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
 
     token = tokenize(df, column, max_branch)
 
-    start = {
-        ("shuffle-join-" + token, 0, inp): (df._name, i)
+    start1 = {
+        ("shuffle-join1-" + token, 0, inp): (df._name, i)
         if i < df.npartitions
         else df._meta
         for i, inp in enumerate(inputs)
     }
+    start2 = {
+        ("shuffle-join2-" + token, 0, inp): (column._name, i)
+        if i < column.npartitions
+        else column._meta
+        for i, inp in enumerate(inputs)
+    }
+    start3 = {
+        ("shuffle-join-" + token, 0, inp): (
+            make_tuple,
+            ("shuffle-join1-" + token, 0, inp),
+            ("shuffle-join2-" + token, 0, inp),
+        )
+        for inp in inputs
+    }
+    start = toolz.merge(start1, start2, start3)
 
     for stage in range(1, stages + 1):
         group = {  # Convert partition into dict of dataframe pieces
             ("shuffle-group-" + token, stage, inp): (
                 shuffle_group,
                 ("shuffle-join-" + token, stage - 1, inp),
-                column,
                 stage - 1,
                 k,
                 n,
@@ -509,7 +545,7 @@ def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
 
         join = {  # concatenate those pieces together, with their friends
             ("shuffle-join-" + token, stage, inp): (
-                _concat,
+                pair_concat,
                 [
                     (
                         "shuffle-split-" + token,
@@ -527,21 +563,34 @@ def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
         joins.append(join)
 
     end = {
-        ("shuffle-" + token, i): ("shuffle-join-" + token, stages, inp)
+        ("shuffle-" + token, i): (getitem, ("shuffle-join-" + token, stages, inp), 0)
+        for i, inp in enumerate(inputs)
+    }
+    end2 = {
+        ("shuffle-col-" + token, i): (
+            getitem,
+            ("shuffle-join-" + token, stages, inp),
+            1,
+        )
         for i, inp in enumerate(inputs)
     }
 
-    dsk = toolz.merge(start, end, *(groups + splits + joins))
-    graph = HighLevelGraph.from_collections("shuffle-" + token, dsk, dependencies=[df])
-    df2 = DataFrame(graph, "shuffle-" + token, df, df.divisions)
+    dsk = toolz.merge(start, end, end2, *(groups + splits + joins))
+    graph = HighLevelGraph.from_collections(
+        "shuffle-" + token, dsk, dependencies=[df, column]
+    )
+    df2 = DataFrame(graph, "shuffle-" + token, df._meta, [None] * (n + 1))
+    df2.divisions = (None,) * (n + 1)
+    df_col = Series(graph, "shuffle-col-" + token, column._meta, [None] * (n + 1))
+    df_col.divisions = (None,) * (n + 1)
 
     if npartitions is not None and npartitions != df.npartitions:
         parts = [i % df.npartitions for i in range(npartitions)]
         token = tokenize(df2, npartitions)
 
         dsk = {
-            ("repartition-group-" + token, i): (shuffle_group_2, k, column)
-            for i, k in enumerate(df2.__dask_keys__())
+            ("repartition-group-" + token, i): (shuffle_group_2, k, l)
+            for i, (k, l) in enumerate(zip(df2.__dask_keys__(), df_col.__dask_keys__()))
         }
         for p in range(npartitions):
             dsk[("repartition-get-" + token, p)] = (
@@ -608,7 +657,7 @@ def set_partitions_pre(s, divisions):
 def shuffle_group_2(df, col):
     if not len(df):
         return {}, df
-    ind = df[col].astype(np.int64)
+    ind = col.astype(np.int64)
     n = ind.max() + 1
     result2 = group_split_dispatch(df, ind.values.view(np.int64), n)
     return result2, df.iloc[:0]
@@ -622,7 +671,7 @@ def shuffle_group_get(g_head, i):
         return head
 
 
-def shuffle_group(df, col, stage, k, npartitions):
+def shuffle_group(df_and_col, stage, k, npartitions):
     """ Splits dataframe into groups
 
     The group is determined by their final partition, and which stage we are in
@@ -630,9 +679,8 @@ def shuffle_group(df, col, stage, k, npartitions):
 
     Parameters
     ----------
-    df: DataFrame
-    col: str
-        Column name on which to split the dataframe
+    df_and_col: tuple[DataFrame, Series]
+        A tuple of the dataframe and series that specify how to split it
     stage: int
         We shuffle dataframes with many partitions we in a few stages to avoid
         a quadratic number of tasks.  This number corresponds to which stage
@@ -644,23 +692,21 @@ def shuffle_group(df, col, stage, k, npartitions):
 
     Returns
     -------
-    out: Dict[int, DataFrame]
-        A dictionary mapping integers in {0..k} to dataframes such that the
-        hash values of ``df[col]`` are well partitioned.
+    out: Dict[int, tuple[DataFrame, Series]]
+        A dictionary mapping integers in {0..k} to pairs of Dataframes Series
     """
-    if col == "_partitions":
-        ind = df[col]
-    else:
-        ind = hash_object_dispatch(df, index=False)
+    df, col = df_and_col
 
-    c = ind.values
+    c = col.values
     typ = np.min_scalar_type(npartitions * 2)
-
     c = np.mod(c, npartitions).astype(typ, copy=False)
     np.floor_divide(c, k ** stage, out=c)
     np.mod(c, k, out=c)
 
-    return group_split_dispatch(df, c.astype(np.int64), k)
+    df_parts = group_split_dispatch(df, c.astype(np.int64), k)
+    col_parts = group_split_dispatch(col, c.astype(np.int64), k)
+
+    return {i: (df_parts[i], col_parts[i]) for i in df_parts.keys()}
 
 
 def shuffle_group_3(df, col, npartitions, p):
