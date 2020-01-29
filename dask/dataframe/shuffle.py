@@ -670,6 +670,7 @@ def shuffle_group_get(g_head, i):
     else:
         return head
 
+import cudf
 
 def shuffle_group(df_and_col, stage, k, npartitions):
     """ Splits dataframe into groups
@@ -704,6 +705,13 @@ def shuffle_group(df_and_col, stage, k, npartitions):
     np.mod(c, k, out=c)
 
     df_parts = group_split_dispatch(df, c.astype(np.int64), k)
+
+    if isinstance(col, cudf.core.series.Series):
+        col = col.to_frame()
+        col_parts = group_split_dispatch(col, c.astype(np.int64), k)
+
+        return {i: (df_parts[i], col_parts[i][col_parts[i].columns[0]]) for i in df_parts.keys()}
+
     col_parts = group_split_dispatch(col, c.astype(np.int64), k)
 
     return {i: (df_parts[i], col_parts[i]) for i in df_parts.keys()}
