@@ -461,7 +461,7 @@ def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
     shuffle_group: does the actual splitting per-partition
     """
     max_branch = max_branch or 32
-    n = df.npartitions
+    n = npartitions if npartitions is not None else df.npartitions
 
     stages = int(math.ceil(math.log(n) / math.log(max_branch)))
     if stages > 1:
@@ -533,7 +533,11 @@ def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
 
     dsk = toolz.merge(start, end, *(groups + splits + joins))
     graph = HighLevelGraph.from_collections("shuffle-" + token, dsk, dependencies=[df])
-    df2 = DataFrame(graph, "shuffle-" + token, df, df.divisions)
+    df2 = DataFrame(graph, "shuffle-" + token, df._meta, [None] * (n + 1))
+    df2.divisions = (None,) * (n + 1)
+    #if n != df.npartitions:
+    #    print(f"n: {n}, df.npartitions: {df.npartitions}")
+    return df2
 
     if npartitions is not None and npartitions != df.npartitions:
         parts = [i % df.npartitions for i in range(npartitions)]
@@ -652,7 +656,7 @@ def shuffle_group(df, col, stage, k, npartitions):
         ind = df[col]
     else:
         ind = hash_object_dispatch(df, index=False)
-
+    #print("type: ", type(ind))
     c = ind.values
     typ = np.min_scalar_type(npartitions * 2)
 

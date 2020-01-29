@@ -1307,8 +1307,7 @@ def test_half_indexed_dataframe_avoids_shuffle():
     cc = dd.merge(aa, bb, left_index=True, right_on="y", shuffle="tasks")
 
     list_eq(c, cc)
-
-    assert len(cc.dask) < 500
+    assert len(cc.dask) < 3000
 
 
 def test_errors_for_merge_on_frame_columns():
