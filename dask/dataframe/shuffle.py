@@ -266,6 +266,7 @@ def shuffle(df, index, shuffle=None, npartitions=None, max_branch=32, compute=No
     )
     shuffle = shuffle or config.get("shuffle", None) or "disk"
     if shuffle == "tasks":
+        #print("partitions: ", partitions)
         df3 = rearrange_by_column(
             df,
             partitions,
@@ -480,7 +481,8 @@ def rearrange_by_column_tasks(df, column, max_branch=32, npartitions=None):
     rearrange_by_column: parent function that calls this or rearrange_by_column_disk
     shuffle_group: does the actual splitting per-partition
     """
-    max_branch = max_branch or 32
+    #print("rearrange_by_column_tasks() - ", type(column))
+    max_branch = max_branch or 3200
     n = df.npartitions
     column = df[column] if isinstance(column, str) else column
     assert column.npartitions == df.npartitions
@@ -634,7 +636,9 @@ def partitioning_index(df, npartitions):
     partitions : ndarray
         An array of int64 values mapping each record to a partition.
     """
-    return hash_object_dispatch(df, index=False) % int(npartitions)
+    ret =  hash_object_dispatch(df, index=False) % int(npartitions)
+    #print("partitioning_index: ", type(ret))
+    return ret
 
 
 def barrier(args):
@@ -696,25 +700,24 @@ def shuffle_group(df_and_col, stage, k, npartitions):
     out: Dict[int, tuple[DataFrame, Series]]
         A dictionary mapping integers in {0..k} to pairs of Dataframes Series
     """
+
     df, col = df_and_col
 
+    if not isinstance(col, cudf.core.series.Series):
+        col = cudf.core.series.Series(col)
+
+    #print("df_and_col: ", type(df), type(col))
     c = col.values
     typ = np.min_scalar_type(npartitions * 2)
+
     c = np.mod(c, npartitions).astype(typ, copy=False)
     np.floor_divide(c, k ** stage, out=c)
     np.mod(c, k, out=c)
 
     df_parts = group_split_dispatch(df, c.astype(np.int64), k)
-
-    if isinstance(col, cudf.core.series.Series):
-        col = col.to_frame()
-        col_parts = group_split_dispatch(col, c.astype(np.int64), k)
-
-        return {i: (df_parts[i], col_parts[i][col_parts[i].columns[0]]) for i in df_parts.keys()}
-
+    col = col.to_frame()
     col_parts = group_split_dispatch(col, c.astype(np.int64), k)
-
-    return {i: (df_parts[i], col_parts[i]) for i in df_parts.keys()}
+    return {i: (df_parts[i], col_parts[i][col_parts[i].columns[0]]) for i in df_parts.keys()}
 
 
 def shuffle_group_3(df, col, npartitions, p):
