@@ -466,7 +466,7 @@ class All2All:
 
 
         for i, in_key in enumerate(self.input_keys):
-            deps[("shuffle-group-"+self.token, i)] = tuple(self.input_keys)
+            deps[("shuffle-group-"+self.token, i)] = (in_key,)
             tasks[("shuffle-group-"+self.token, i)] = (
                 shuffle_group,
                 in_key,
