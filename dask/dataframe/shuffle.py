@@ -440,6 +440,53 @@ def _noop(x, cleanup_token):
     return x
 
 
+
+class All2All:
+    def __init__(self, token, column, ignore_index, input_keys, output_keys):
+        self._all2all = True
+        self.token = token
+        self.column = column
+        self.ignore_index = ignore_index
+
+        assert len(input_keys) == len(output_keys)
+        self.input_keys = input_keys
+        self.output_keys = output_keys
+
+    def __repr__(self):
+        return f"All2All(input_keys={self.input_keys}, output_keys={self.output_keys})"
+
+    def __call__(self):
+        pass
+
+    def get_tasks_and_deps(self):
+        n = len(self.input_keys)
+        tasks = {}
+        deps = {}
+
+        for i, (in_key, out_key) in enumerate(zip(self.input_keys, self.output_keys)):
+            deps[("shuffle-group-"+self.token, i)] = tuple(self.input_keys)
+            tasks[("shuffle-group-"+self.token, i)] = (
+                shuffle_group,
+                in_key,
+                self.column,
+                0,
+                n,
+                n,
+                self.ignore_index
+            )
+            for j in range(n):
+                deps[("shuffle-getitem-"+self.token, i, j)] = (("shuffle-group-"+self.token, j),)
+                tasks[("shuffle-getitem-"+self.token, i, j)] = (getitem, ("shuffle-group-"+self.token, j), i)
+
+            deps[out_key] = tuple([("shuffle-getitem-" + self.token, i, j) for j in range(n)])
+            tasks[out_key] = (_concat, [("shuffle-getitem-" + self.token, i, j) for j in range(n)])
+        return tasks, deps
+
+
+
+
+
+
 def rearrange_by_column_tasks(
     df, column, max_branch=32, npartitions=None, ignore_index=False
 ):
@@ -495,6 +542,7 @@ def rearrange_by_column_tasks(
     n = df.npartitions
 
     stages = int(math.ceil(math.log(n) / math.log(max_branch)))
+    stages = 1
     if stages > 1:
         k = int(math.ceil(n ** (1 / stages)))
     else:
@@ -558,14 +606,53 @@ def rearrange_by_column_tasks(
         groups.append(group)
         splits.append(split)
         joins.append(join)
+    import pprint
+    # from dask.optimization import SubgraphCallable
+
+    # sc = SubgraphCallable(
+    #     groups + splits + joins,
+    #     outkey=[("all2all-" + token)],
+    #     inkeys=[("shuffle-join-" + token, stages, inp) for inp in inputs],
+    #     name="all2all",
+    # )
+
+    end = {
+        ("shuffle-" + token, i): ("all2all-" + token) for i, inp in enumerate(inputs)
+    }
+
+    all2all = {
+        "all2all-" + token: (
+            All2All(token=token, column=column, ignore_index=ignore_index, input_keys=list(start.keys()), output_keys=list(end.keys())),
+            [("shuffle-join-" + token, stage - 1, inp) for i, inp in enumerate(inputs)],
+        )
+    }
+
+
+    dsk = toolz.merge(start, all2all, end)
+    #pprint.pprint(dsk)
+    # for k,v in dsk.items():
+    #     print(f"{k}: {v}")
+
+    graph = HighLevelGraph.from_collections("shuffle-" + token, dsk, dependencies=[df])
+
+
 
     end = {
         ("shuffle-" + token, i): ("shuffle-join-" + token, stages, inp)
         for i, inp in enumerate(inputs)
     }
 
-    dsk = toolz.merge(start, end, *(groups + splits + joins))
-    graph = HighLevelGraph.from_collections("shuffle-" + token, dsk, dependencies=[df])
+
+
+    # end = {
+    #     ("shuffle-" + token, i): ("shuffle-join-" + token, stages, inp)
+    #     for i, inp in enumerate(inputs)
+    # }
+    # dsk = toolz.merge(start, end, *(groups + splits + joins))
+    # graph = HighLevelGraph.from_collections("shuffle-" + token, dsk, dependencies=[df])
+
+
+
     df2 = DataFrame(graph, "shuffle-" + token, df, df.divisions)
 
     if npartitions is not None and npartitions != df.npartitions:
@@ -714,6 +801,7 @@ def shuffle_group(df, col, stage, k, npartitions, ignore_index):
         A dictionary mapping integers in {0..k} to dataframes such that the
         hash values of ``df[col]`` are well partitioned.
     """
+    print("shuffle_group() - df: ", repr(df), ", ignore_index: ", ignore_index)
     if col == "_partitions":
         ind = df[col]
     else:
