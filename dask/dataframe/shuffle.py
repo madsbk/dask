@@ -463,7 +463,9 @@ class All2All:
         tasks = {}
         deps = {}
 
-        for i, (in_key, out_key) in enumerate(zip(self.input_keys, self.output_keys)):
+
+
+        for i, in_key in enumerate(self.input_keys):
             deps[("shuffle-group-"+self.token, i)] = tuple(self.input_keys)
             tasks[("shuffle-group-"+self.token, i)] = (
                 shuffle_group,
@@ -474,12 +476,15 @@ class All2All:
                 n,
                 self.ignore_index
             )
-            for j in range(n):
-                deps[("shuffle-getitem-"+self.token, i, j)] = (("shuffle-group-"+self.token, j),)
-                tasks[("shuffle-getitem-"+self.token, i, j)] = (getitem, ("shuffle-group-"+self.token, j), i)
 
-            deps[out_key] = tuple([("shuffle-getitem-" + self.token, i, j) for j in range(n)])
-            tasks[out_key] = (_concat, [("shuffle-getitem-" + self.token, i, j) for j in range(n)])
+        for i in range(n):
+            for j in range(n):
+                deps[("shuffle-split-"+self.token, i, j)] = (("shuffle-group-"+self.token, j),)
+                tasks[("shuffle-split-"+self.token, i, j)] = (getitem, ("shuffle-group-"+self.token, j), i)
+
+        for i, out_key in enumerate(self.output_keys):
+            deps[out_key] = tuple([("shuffle-split-" + self.token, i, j) for j in range(n)])
+            tasks[out_key] = (_concat, [("shuffle-split-" + self.token, i, j) for j in range(n)])
         return tasks, deps
 
 
