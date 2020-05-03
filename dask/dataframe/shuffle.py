@@ -801,7 +801,7 @@ def shuffle_group(df, col, stage, k, npartitions, ignore_index):
         A dictionary mapping integers in {0..k} to dataframes such that the
         hash values of ``df[col]`` are well partitioned.
     """
-    print("shuffle_group() - df: ", repr(df), ", ignore_index: ", ignore_index)
+    #print("shuffle_group() - df: ", repr(df), ", ignore_index: ", ignore_index)
     if col == "_partitions":
         ind = df[col]
     else:
