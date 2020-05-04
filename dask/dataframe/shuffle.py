@@ -458,14 +458,16 @@ class All2All:
     def __call__(self):
         pass
 
-    def get_tasks_and_deps(self):
+    def get_tasks(self, priority=0):
         n = len(self.input_keys)
         tasks = {}
         deps = {}
+        priorities = {}
 
         for i, in_key in enumerate(self.input_keys):
             in_key = str(in_key)
             key = str(("shuffle-group-"+self.token, i))
+            priorities[key] = priority
             deps[key] = (in_key,)
             tasks[key] = (
                 shuffle_group,
@@ -481,16 +483,17 @@ class All2All:
             for j in range(n):
                 key1 = str(("shuffle-split-"+self.token, i, j))
                 key2 = str(("shuffle-group-"+self.token, j))
+                priorities[key1] = 0  # See <https://github.com/dask/dask/pull/6051>
                 deps[key1] = (key2,)
                 tasks[key1] = (getitem, key2, i)
 
         for i, out_key in enumerate(self.output_keys):
             out_key = str(out_key)
             keys = tuple(str(("shuffle-split-" + self.token, i, j)) for j in range(n))
+            priorities[out_key] = priority
             deps[out_key] = keys
             tasks[out_key] = (_concat, keys)
-        return tasks, deps
-
+        return tasks, deps, priorities
 
 
 
