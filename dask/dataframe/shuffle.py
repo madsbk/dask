@@ -351,6 +351,11 @@ def rearrange_by_column(
         return rearrange_by_column_tasks(
             df, col, max_branch, npartitions, ignore_index=ignore_index
         )
+    elif shuffle == "dynamic-tasks":
+        from distributed import dynamic_tasks
+        return dynamic_tasks.rearrange_by_column_dynamic_tasks(
+            df, col, max_branch, npartitions, ignore_index=ignore_index
+        )
     else:
         raise NotImplementedError("Unknown shuffle method %s" % shuffle)
 
