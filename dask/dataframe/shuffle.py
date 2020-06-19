@@ -1,3 +1,4 @@
+import os
 import contextlib
 import logging
 import math
@@ -347,7 +348,11 @@ def rearrange_by_column(
     shuffle = shuffle or config.get("shuffle", None) or "disk"
     if shuffle == "disk":
         return rearrange_by_column_disk(df, col, npartitions, compute=compute)
-    elif shuffle == "tasks":
+
+    if "DASK_SHUFFLE" in os.environ:
+        shuffle = os.environ["DASK_SHUFFLE"]
+
+    if shuffle == "tasks":
         return rearrange_by_column_tasks(
             df, col, max_branch, npartitions, ignore_index=ignore_index
         )
