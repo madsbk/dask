@@ -1,70 +1,228 @@
 from collections.abc import Mapping
+from typing import Hashable, List, Set, Union
 
 import tlz as toolz
 
 from .utils import ignoring
 from .base import is_dask_collection
-from .core import reverse_dict, get_dependencies, flatten
+from .core import reverse_dict, get_dependencies
+
+
+class HlgKeys:
+    """ The base class for high level graph keys
+
+    Parameters
+    ----------
+    value: set
+        The set of keys.
+    name: str
+        Common name of ALL the keys in `value` or None if `value` doesn't
+        share a common key name.
+    """
+
+    def __init__(self, value=set(), name=None):
+        self._value = value
+        self._name = name
+
+    def name(self):
+        """ Return the common name of ALL keys in self or None if they
+        doesn't share name."""
+        return self._name
+
+    def named(self):
+        """ Whether the keys share a commen name or not """
+        return self._name is not None
+
+    def value(self) -> Set:
+        """ Return a regular set of keys
+
+        Notice, this function will trigger a materialization of the set
+        """
+        return self._value
+
+    def _may_contain(self, key: Hashable):
+        """ Fast track check if self contains `key` """
+
+        if self.named():
+            if not (
+                isinstance(key, tuple)
+                and len(key) > 0
+                and isinstance(key[0], str)
+                and key[0] == self.name()
+            ):
+                return False
+        else:
+            return True
+
+    def _may_intersect(self, other: "HlgKeys"):
+        """ Fast track check if self intersect `key` """
+        return not (
+            (self.named() and self.name() != other.name())
+            or len(self) == 0
+            or len(other) == 0
+        )
+
+    def __len__(self):
+        return len(self.value())
+
+    def __contains__(self, key: Hashable):
+        return self._may_contain(key) and key in self.value()
+
+    def __and__(self, other):
+        """Return a new set with keys common in self and other"""
+        if isinstance(other, HlgKeys):
+            if self._may_intersect(other):
+                return other & self.value()
+            else:
+                return HlgKeys()
+        else:
+            return HlgKeys(name=None, value=other & self.value())
+
+    def __or__(self, other):
+        """Return a new set with keys from self and other"""
+        if len(other) == 0:
+            return self
+        if isinstance(other, HlgKeys):
+            if len(self) == 0:
+                return other
+            else:
+                return other | self.value()
+        else:
+            return HlgKeys(name=None, value=other | self.value())
+
+    def __repr__(self):
+        return (
+            f"<{type(self).__name__} name={repr(self._name)} "
+            f"keys={repr(self.value())}>"
+        )
+
+
+class HlgKeysList(HlgKeys):
+    """ List of sets that act as a `HlgKeys`
+
+    Parameters
+    ----------
+    list_of_sets: list of sets or HlgKeys
+        The sets and/or HlgKeys that makes up this `HlgKeysList`.
+    name: str
+        Common name of ALL the keys in `list_of_sets` or None if
+        `list_of_sets` doesn't share a common key name.
+    """
+
+    def __init__(self, list_of_keys: List[Union[HlgKeys, Set]] = [], name=None):
+        self._list_of_keys = list_of_keys
+        super().__init__(name=name)
+
+    def value(self) -> Set:
+        ret = set()
+        for keys in self._list_of_keys:
+            if isinstance(keys, HlgKeys):
+                ret |= keys.value()
+            else:
+                ret |= keys
+        return ret
+
+    def __contains__(self, key: Hashable):
+        if self._may_contain(key):
+            for keys in self._list_of_keys:
+                if key in keys:
+                    return True
+        return False
+
+    def __len__(self):
+        return sum([len(k) for k in self._list_of_keys], 0)
+
+    def __and__(self, other):
+        if isinstance(other, HlgKeys):
+            if not self._may_intersect(other):
+                return HlgKeysList()
+            name = self.name() if self.name() == other.name() else None
+            ret = []
+            for keys in self._list_of_keys:
+                ret.append(other & keys)
+            return HlgKeysList(list_of_keys=ret, name=name)
+        else:
+            ret = []
+            for keys in self._list_of_keys:
+                ret.append(keys & other)
+            return HlgKeysList(list_of_keys=ret)
+
+    def __or__(self, other):
+        if len(other) == 0:
+            return self
+        name = None
+        if isinstance(other, HlgKeys):
+            if len(self) == 0:
+                return other
+            name = self.name() if self.name() == other.name() else None
+            if isinstance(other, HlgKeysList):
+                return HlgKeysList(self._list_of_sets + other._list_of_sets, name=name)
+
+        return HlgKeysList(self._list_of_sets + [other], name=name)
+
+    def __repr__(self):
+        return (
+            f"<{type(self).__name__} name={repr(self._name)} "
+            f"sets={repr(self._list_of_keys)}>"
+        )
 
 
 class Layer(Mapping):
-    def cull(self, keys):
-        """ Return new dask with only the tasks required to calculate keys.
+    """ High level graph layer
 
-        In other words, remove unnecessary tasks from dask.
-        ``keys`` may be a single key or list of keys.
+    This abstract class establish a protocol for high level graph layers.
+    """
+
+    def __contains__(self, key):
+        return key in self.get_key_set()
+
+    def get_key_set(self) -> HlgKeys:
+        """ Return the keys of the layer as a set """
+        return HlgKeys(set(self.keys()))
+
+    def cull(self, keys: HlgKeys) -> "Layer":
+        """ Return a new Layer with only the tasks required to calculate `keys`.
+
+        In other words, remove unnecessary tasks from the layer.
 
         Examples
         --------
-        >>> d = {'x': 1, 'y': (inc, 'x'), 'out': (add, 'x', 10)}
-        >>> dsk, dependencies = cull(d, 'out')  # doctest: +SKIP
+        >>> d = Layer({'x': 1, 'y': (inc, 'x'), 'out': (add, 'x', 10)})
+        >>> dsk = d.cull(HlgKeys(set('out')))
         >>> dsk  # doctest: +SKIP
         {'x': 1, 'out': (add, 'x', 10)}
-        >>> dependencies  # doctest: +SKIP
-        {'x': set(), 'out': set(['x'])}
 
         Returns
         -------
-        dsk: culled dask graph
-        dependencies: Dict mapping {key: [deps]}.  Useful side effect to accelerate
-            other optimizations, notably fuse.
+        layer: Layer
+            Culled layer
         """
-        if not isinstance(keys, (list, set)):
-            keys = [keys]
-
         seen = set()
-        dependencies = dict()
         out = {}
-        work = list(set(flatten(keys)))
+        work = keys.value()
 
-        while work:
+        while len(work) > 0:
             new_work = []
             for k in work:
-                dependencies_k = get_dependencies(
-                    self, k, as_list=True
-                )  # fuse needs lists
                 out[k] = self[k]
-                dependencies[k] = dependencies_k
-                for d in dependencies_k:
+                for d in get_dependencies(self, k, as_list=True):
                     if d not in seen:
                         seen.add(d)
                         new_work.append(d)
-
             work = new_work
-
         return BasicLayer(out)
 
-    def get_external_dependencies(self, known_keys):
+    def get_external_dependencies(self, known_keys: HlgKeys):
         """Get external dependencies
 
         Parameters
         ----------
-        known_keys : set
+        known_keys : HlgKeys
             Set of known keys (typically all keys in a HighLevelGraph)
 
         Returns
         -------
-        deps: set
+        deps: HlgKeys
             Set of dependencies
         """
         ret = set()
@@ -87,12 +245,15 @@ class Layer(Mapping):
                     except TypeError:  # not hashable
                         pass
             work = new_work
-        return ret
+        return HlgKeys(ret)
 
 
 class BasicLayer(Layer):
-    def __init__(self, mapping):
+    """ Basic implementation of `Layer` that takes a mapping and a name """
+
+    def __init__(self, mapping, name=None):
         self.__mapping = mapping
+        self.__name = name
 
     def __getitem__(self, k):
         return self.__mapping[k]
@@ -102,6 +263,15 @@ class BasicLayer(Layer):
 
     def __len__(self):
         return len(self.__mapping)
+
+    def __repr__(self):
+        return (
+            f"<{type(self).__name__} name={repr(self.__name)} "
+            f"mapping={repr(self.__mapping)}>"
+        )
+
+    def get_key_set(self) -> HlgKeys:
+        return HlgKeys(set(self.keys()), name=self.__name)
 
 
 class HighLevelGraph(Mapping):

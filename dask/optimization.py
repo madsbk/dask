@@ -1015,7 +1015,7 @@ def fix_hlg_dependencies_inplace(hlg):
     all_keys = set(hlg.keys())
     fixed_layers_dependencies = {k: set() for k in hlg.layers.keys()}
     for k, v in hlg.layers.items():
-        for key in v.get_external_dependencies(all_keys):
+        for key in v.get_external_dependencies(all_keys).value():
             fixed_layers_dependencies[k].add(find_layer_containing_key(hlg, key))
     hlg.dependencies = dict(fixed_layers_dependencies)
     return hlg
@@ -1038,20 +1038,24 @@ def cull_highlevelgraph(hlg, keys):
     # TODO: remove this when <https://github.com/dask/dask/pull/6509> passes
     fix_hlg_dependencies_inplace(hlg)
 
-    if not isinstance(keys, (list, set)):
-        keys = [keys]
-    keys = set(flatten(keys))
+    # Make sure `keys` is a `HlgKeys`
+    if not isinstance(keys, highlevelgraph.HlgKeys):
+        if not isinstance(keys, (list, set)):
+            keys = [keys]
+        keys = highlevelgraph.HlgKeys(set(flatten(keys, container=set)))
 
     layers = toposort_layers(hlg)
     ret_layers = {}
-    known_keys = set(hlg.keys())
+    known_keys = highlevelgraph.HlgKeysList(
+        [layer.get_key_set() for layer in hlg.layers.values()]
+    )
 
     for layer_name in reversed(layers):
         layer = hlg.layers[layer_name]
-        key_deps = {k for k in keys if k in layer}
+        key_deps = keys & layer.get_key_set()
         if len(key_deps) > 0:
             culled_layer = layer.cull(key_deps)
-            keys.update(culled_layer.get_external_dependencies(known_keys))
+            keys = keys | culled_layer.get_external_dependencies(known_keys)
             ret_layers[layer_name] = culled_layer
 
     ret_dependencies = {}
