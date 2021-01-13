@@ -21,6 +21,7 @@ from ..sizeof import sizeof
 from ..utils import digit, insert, M, stringify, stringify_collection_keys
 from .utils import hash_object_dispatch, group_split_dispatch
 from . import methods
+import dask
 
 logger = logging.getLogger(__name__)
 
@@ -936,6 +937,22 @@ def rearrange_by_column_tasks(
     rearrange_by_column: parent function that calls this or rearrange_by_column_disk
     shuffle_group: does the actual splitting per-partition
     """
+
+    if dask.config.get("use-explicit-comms", False):
+        try:
+            import dask_cuda.explicit_comms
+            import distributed.worker
+            distributed.worker.get_client()
+        except:
+            pass
+        else:
+            if isinstance(column, str):
+                column = [column]
+            print(f"rearrange_by_column_tasks() - use-explicit-comms! - column: {column}")
+            print(df)
+            return dask_cuda.explicit_comms.dataframe_shuffle(
+                df, column, npartitions, ignore_index
+            )
 
     max_branch = max_branch or 32
 
